@@ -6,6 +6,16 @@ pub struct BitAddr {
     pub bit: u8,
 }
 
+impl BitAddr {
+    pub fn as_byte(&self) -> u8 {
+        if self.byte < 0x80 {
+            (self.byte & 0b00011111) | ((self.bit & 0b111) << 5)
+        } else {
+            ((self.byte & 0b11111) << 5) | (self.bit & 0b111)
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Operand {
     RegisterDirect(GeneralPurposeRegister),
@@ -119,6 +129,7 @@ pub enum Instruction {
     Increment {
         operand: Operand,
     },
+    IncrementDPtr,
 
     Decrement {
         operand: Operand,
@@ -147,6 +158,15 @@ pub enum Instruction {
         dst: Operand,
     },
 
+    LogicalAndCarry {
+        src: BitAddr,
+        complement: bool,
+    },
+    LogicalOrCarry {
+        src: BitAddr,
+        complement: bool,
+    },
+
     Mov {
         src: Operand,
         dst: Operand,
@@ -160,15 +180,15 @@ pub enum Instruction {
     },
 
     JumpIfBitAndClear {
-        bit: u8,
+        bit: BitAddr,
         offset: i8,
     },
     JumpIfBit {
-        bit: u8,
+        bit: BitAddr,
         offset: i8,
     },
     JumpIfNotBit {
-        bit: u8,
+        bit: BitAddr,
         offset: i8,
     },
     JumpIfCarry {
@@ -178,6 +198,9 @@ pub enum Instruction {
         offset: i8,
     },
     JumpIfZero {
+        offset: i8,
+    },
+    JumpIfNonZero {
         offset: i8,
     },
     ShortJump {
@@ -219,13 +242,13 @@ pub enum Instruction {
     MovAccToXMemDptr,
     MovXMemToAccDptr,
     MovAccToXMemIndirect {
-        imm: Indirect,
+        reg: Indirect,
     },
-    MovXMemToAccIndirectR0 {
-        imm: Indirect,
+    MovXMemToAccIndirect {
+        reg: Indirect,
     },
-    MovAccPcToAcc,
-    MovAccDptrToAcc,
+    MovCodeAccPcToAcc,
+    MovCodeAccDptrToAcc,
 
     Return,
     ReturnFromInterrupt,
@@ -268,6 +291,7 @@ pub enum Instruction {
 
 use Instruction::*;
 
+#[derive(Debug)]
 pub enum InstructionDecodeError {
     InvalidOperand(Operand),
 }
@@ -470,7 +494,185 @@ impl Instruction {
                 buffer.push(*offset as u8);
             }
 
-            _ => todo!(),
+            JumpIfBitAndClear { bit, offset } => {
+                buffer.push(0x10);
+                buffer.push(bit.as_byte());
+                buffer.push(*offset as u8)
+            }
+
+            JumpIfBit { bit, offset } => {
+                buffer.push(0x20);
+                buffer.push(bit.as_byte());
+                buffer.push(*offset as u8)
+            }
+
+            JumpIfNotBit { bit, offset } => {
+                buffer.push(0x30);
+                buffer.push(bit.as_byte());
+                buffer.push(*offset as u8)
+            }
+
+            JumpIfCarry { offset } => {
+                buffer.push(0x40);
+                buffer.push(*offset as u8)
+            }
+
+            JumpIfNotCarry { offset } => {
+                buffer.push(0x50);
+                buffer.push(*offset as u8)
+            }
+
+            JumpIfZero { offset } => {
+                buffer.push(0x60);
+                buffer.push(*offset as u8);
+            }
+
+            JumpIfNonZero { offset } => {
+                buffer.push(0x70);
+                buffer.push(*offset as u8)
+            }
+
+            ShortJump { offset } => {
+                buffer.push(0x80);
+                buffer.push(*offset as u8)
+            }
+
+            MovImmediateDataPtr { value } => {
+                buffer.push(0x90);
+                buffer.extend_from_slice(&value.to_le_bytes())
+            }
+
+            LogicalOrCarry { src, complement } => {
+                buffer.push(if *complement { 0xA0 } else { 0x72 });
+                buffer.push(src.as_byte());
+            }
+
+            LogicalAndCarry { src, complement } => {
+                buffer.push(if *complement { 0xB0 } else { 0x82 });
+                buffer.push(src.as_byte());
+            }
+
+            Push { addr } => {
+                buffer.push(0xC0);
+                buffer.push(*addr)
+            }
+
+            Pop { addr } => {
+                buffer.push(0xD0);
+                buffer.push(*addr)
+            }
+
+            MovXMemToAccDptr => {
+                buffer.push(0xE0);
+            }
+
+            MovAccToXMemDptr => {
+                buffer.push(0xF0);
+            }
+
+            AbsoluteJump { addr } => {
+                assert!(
+                    *addr < (1 << 12),
+                    "Addr must be less than 2**12 found {addr:x}"
+                );
+                buffer.push(0x1 | ((addr & (0b111 << 8) >> 4) as u8));
+                buffer.push((addr & 0xff) as u8);
+            }
+
+            AbsoluteCall { addr } => {
+                assert!(
+                    *addr < (1 << 12),
+                    "Addr must be less than 2**12 found {addr:x}"
+                );
+                buffer.push(0x11 | ((addr & (0b111 << 8) >> 4) as u8));
+                buffer.push((addr & 0xff) as u8);
+            }
+
+            LongJump { addr } => {
+                buffer.push(0x02);
+                buffer.extend_from_slice(&addr.to_le_bytes())
+            }
+
+            LongCall { addr } => {
+                buffer.push(0x12);
+                buffer.extend_from_slice(&addr.to_le_bytes())
+            }
+
+            Return => buffer.push(0x22),
+
+            ReturnFromInterrupt => buffer.push(0x32),
+
+            MovCarryBit { bit_addr } => {
+                buffer.push(0x92);
+                buffer.push(bit_addr.as_byte())
+            }
+
+            MovBitCarry { bit_addr } => {
+                buffer.push(0xA2);
+                buffer.push(bit_addr.as_byte())
+            }
+
+            ComplementBit { bit_addr } => {
+                buffer.push(0xB2);
+                buffer.push(bit_addr.as_byte())
+            }
+
+            ClearBit { bit_addr } => {
+                buffer.push(0xC2);
+                buffer.push(bit_addr.as_byte())
+            }
+
+            SetBit { bit_addr } => {
+                buffer.push(0xD2);
+                buffer.push(bit_addr.as_byte())
+            }
+
+            MovXMemToAccIndirect { reg: Indirect::R0 } => {
+                buffer.push(0xE2);
+            }
+
+            MovAccToXMemIndirect { reg: Indirect::R0 } => {
+                buffer.push(0xF2);
+            }
+
+            MovXMemToAccIndirect { reg: Indirect::R1 } => {
+                buffer.push(0xE3);
+            }
+
+            MovAccToXMemIndirect { reg: Indirect::R1 } => {
+                buffer.push(0xF3);
+            }
+
+            RotateAccRight => buffer.push(0x03),
+            RotateAccRightThroughCarry => buffer.push(0x13),
+            RotateAccLeft => buffer.push(0x23),
+            RotateAccLeftThroughCarry => buffer.push(0x33),
+
+            JumpAccPlusDptr => buffer.push(0x73),
+
+            MovCodeAccPcToAcc => buffer.push(0x83),
+            MovCodeAccDptrToAcc => buffer.push(0x93),
+
+            IncrementDPtr => buffer.push(0xA3),
+
+            ComplementCarry => buffer.push(0xB3),
+            ClearCarry => buffer.push(0xC3),
+            SetCarry => buffer.push(0xD3),
+
+            Div => buffer.push(0x84),
+            Mul => buffer.push(0xA4),
+
+            SwapAccNibbles => buffer.push(0xC4),
+
+            DecimalAdjustAcc => buffer.push(0xD4),
+
+            ClearAcc => buffer.push(0xE4),
+            ComplementAcc => buffer.push(0xF4),
+
+            ExchangeLowNibble { src: Indirect::R0 } => buffer.push(0xD6),
+            ExchangeLowNibble { src: Indirect::R1 } => buffer.push(0xD7),
+
+            invalid => panic!("Found an invalid operation {:?}", invalid),
         }
 
         Ok(())
